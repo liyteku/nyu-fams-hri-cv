@@ -1,0 +1,54 @@
+# Facial Expression Recognition Training Configuration
+
+# Dataset
+data:
+  root_dir: "data/RAF-DB/DATASET"
+  train_dir: "train"
+  test_dir: "test"
+  num_classes: 7
+  class_names:
+    - "Surprise"   # folder 1 → index 0
+    - "Fear"       # folder 2 → index 1
+    - "Disgust"    # folder 3 → index 2
+    - "Happiness"  # folder 4 → index 3
+    - "Sadness"    # folder 5 → index 4
+    - "Anger"      # folder 6 → index 5
+    - "Neutral"    # folder 7 → index 6
+
+# Model
+model:
+  name: "mobilenetv3_large_100.ra_in1k"
+  pretrained: true
+  num_classes: 7
+
+# Image transforms
+transform:
+  img_size: 224
+  mean: [0.485, 0.456, 0.406]   # ImageNet stats
+  std:  [0.229, 0.224, 0.225]
+  # Augmentation (train only)
+  random_horizontal_flip: 0.5
+  random_rotation: 15
+  color_jitter:
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.1
+  random_erasing: 0.25
+
+# Training
+train:
+  epochs: 30
+  batch_size: 64
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  scheduler: "cosine"           # cosine annealing
+  warmup_epochs: 3
+  num_workers: 4
+  pin_memory: true
+  use_weighted_loss: true       # inversely proportional to class frequency
+
+# Output
+output:
+  dir: "outputs"
+  best_model_name: "best_model.pth"
