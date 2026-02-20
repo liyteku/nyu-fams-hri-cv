@@ -5,11 +5,12 @@ __pycache__/
 dist/
 build/
 *.egg
-venv/
 .venv/
 env/
+.env
 data/
 outputs/
+tests/
 *.log
 .vscode/
 .idea/
