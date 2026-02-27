@@ -14,3 +14,6 @@ face-recognition>=1.3.0
 # setuptools<82 needed for pkg_resources (face_recognition_models) on Python 3.14
 setuptools<82
 torch>=2.0.0
+
+# src/body: body pose detection (YOLO11-pose)
+ultralytics>=8.3.0

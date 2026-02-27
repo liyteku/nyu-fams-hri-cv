@@ -11,6 +11,7 @@ env/
 data/
 outputs/
 tests/
+yolo*.pt
 *.log
 .vscode/
 .idea/
