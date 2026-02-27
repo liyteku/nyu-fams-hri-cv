@@ -7,13 +7,13 @@ data:
   test_dir: "test"
   num_classes: 7
   class_names:
-    - "Surprise"   # folder 1 → index 0
-    - "Fear"       # folder 2 → index 1
-    - "Disgust"    # folder 3 → index 2
-    - "Happiness"  # folder 4 → index 3
-    - "Sadness"    # folder 5 → index 4
-    - "Anger"      # folder 6 → index 5
-    - "Neutral"    # folder 7 → index 6
+    - "Surprise"
+    - "Fear"
+    - "Disgust"
+    - "Happiness"
+    - "Sadness"
+    - "Anger"
+    - "Neutral"
 
 # Model
 model:
@@ -24,16 +24,23 @@ model:
 # Image transforms
 transform:
   img_size: 224
-  mean: [0.485, 0.456, 0.406]   # ImageNet stats
+  mean: [0.485, 0.456, 0.406]
   std:  [0.229, 0.224, 0.225]
   # Augmentation (train only)
   random_horizontal_flip: 0.5
-  random_rotation: 15
+  random_rotation: 20
+  random_affine:
+    translate: [0.1, 0.1]
+    scale: [0.9, 1.1]
   color_jitter:
-    brightness: 0.2
-    contrast: 0.2
-    saturation: 0.2
+    brightness: 0.3
+    contrast: 0.3
+    saturation: 0.3
     hue: 0.1
+  gaussian_blur:
+    kernel_size: 5
+    probability: 0.2
+  random_grayscale: 0.1
   random_erasing: 0.25
 
 # Training
@@ -42,11 +49,20 @@ train:
   batch_size: 64
   lr: 1.0e-3
   weight_decay: 1.0e-4
-  scheduler: "cosine"           # cosine annealing
+  scheduler: "cosine"
   warmup_epochs: 3
   num_workers: 4
   pin_memory: true
-  use_weighted_loss: true       # inversely proportional to class frequency
+  use_weighted_loss: true
+  weight_mode: "sqrt"
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  cutmix_alpha: 1.0
+  freeze_backbone_epochs: 2
+  backbone_lr_scale: 0.5
+  ema_decay: 0.998
+  oversample: false # WeightedRandomSampler (conflicts with weighted loss)
+  tta: false # Test-Time Augmentation (horizontal flip)
 
 # Output
 output:

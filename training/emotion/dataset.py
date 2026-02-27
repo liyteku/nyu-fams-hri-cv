@@ -2,14 +2,14 @@
 dataset.py - RAF-DB data loading and augmentation.
 
 Uses torchvision.datasets.ImageFolder which reads class sub-folders
-(1/, 2/, …, 7/) and maps them to indices 0-6 automatically.
+(1/, 2/, ..., 7/) and maps them to indices 0-6 automatically.
 """
 
 import os
 from collections import Counter
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms
 
 
@@ -17,20 +17,51 @@ def build_train_transform(cfg: dict) -> transforms.Compose:
     """Build augmentation + normalisation pipeline for training."""
     t = cfg["transform"]
     cj = t["color_jitter"]
-    return transforms.Compose([
+    af = t.get("random_affine", {})
+    gb = t.get("gaussian_blur", {})
+
+    transform_list = [
         transforms.Resize((t["img_size"], t["img_size"])),
         transforms.RandomHorizontalFlip(p=t["random_horizontal_flip"]),
         transforms.RandomRotation(degrees=t["random_rotation"]),
-        transforms.ColorJitter(
-            brightness=cj["brightness"],
-            contrast=cj["contrast"],
-            saturation=cj["saturation"],
-            hue=cj["hue"],
-        ),
+    ]
+
+    # RandomAffine (translation + scale)
+    if af:
+        transform_list.append(transforms.RandomAffine(
+            degrees=0,
+            translate=tuple(af.get("translate", [0.1, 0.1])),
+            scale=tuple(af.get("scale", [0.9, 1.1])),
+        ))
+
+    # ColorJitter
+    transform_list.append(transforms.ColorJitter(
+        brightness=cj["brightness"],
+        contrast=cj["contrast"],
+        saturation=cj["saturation"],
+        hue=cj["hue"],
+    ))
+
+    # GaussianBlur
+    if gb:
+        transform_list.append(transforms.RandomApply(
+            [transforms.GaussianBlur(kernel_size=gb.get("kernel_size", 5))],
+            p=gb.get("probability", 0.2),
+        ))
+
+    # RandomGrayscale
+    grayscale_p = t.get("random_grayscale", 0.0)
+    if grayscale_p > 0:
+        transform_list.append(transforms.RandomGrayscale(p=grayscale_p))
+
+    # ToTensor + Normalize + RandomErasing
+    transform_list.extend([
         transforms.ToTensor(),
         transforms.Normalize(mean=t["mean"], std=t["std"]),
         transforms.RandomErasing(p=t["random_erasing"]),
     ])
+
+    return transforms.Compose(transform_list)
 
 
 def build_test_transform(cfg: dict) -> transforms.Compose:
@@ -43,14 +74,21 @@ def build_test_transform(cfg: dict) -> transforms.Compose:
     ])
 
 
-def compute_class_weights(dataset: datasets.ImageFolder, num_classes: int) -> torch.Tensor:
-    """Compute inverse-frequency weights for the loss function."""
+def compute_class_weights(dataset, num_classes: int, mode: str = "inverse") -> torch.Tensor:
+    """Compute class weights for the loss function.
+
+    Args:
+        mode: "inverse" for standard inverse-frequency, "sqrt" for sqrt of inverse (gentler).
+    """
     counter = Counter(dataset.targets)
     total = len(dataset.targets)
     weights = []
     for cls_idx in range(num_classes):
         count = counter.get(cls_idx, 1)
-        weights.append(total / (num_classes * count))
+        w = total / (num_classes * count)
+        if mode == "sqrt":
+            w = w ** 0.5
+        weights.append(w)
     weights_tensor = torch.tensor(weights, dtype=torch.float32)
     return weights_tensor
 
@@ -74,14 +112,35 @@ def build_datasets(cfg: dict):
 def build_dataloaders(cfg: dict, train_dataset, test_dataset):
     """Build DataLoaders for train and test sets."""
     t = cfg["train"]
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=t["batch_size"],
-        shuffle=True,
-        num_workers=t["num_workers"],
-        pin_memory=t["pin_memory"],
-        drop_last=True,
-    )
+    use_oversample = t.get("oversample", False)
+
+    if use_oversample:
+        # Assign each sample a weight = 1 / (count of its class)
+        counter = Counter(train_dataset.targets)
+        sample_weights = [1.0 / counter[label] for label in train_dataset.targets]
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_dataset),
+            replacement=True,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=t["batch_size"],
+            sampler=sampler,        # sampler replaces shuffle
+            num_workers=t["num_workers"],
+            pin_memory=t["pin_memory"],
+            drop_last=True,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=t["batch_size"],
+            shuffle=True,
+            num_workers=t["num_workers"],
+            pin_memory=t["pin_memory"],
+            drop_last=True,
+        )
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=t["batch_size"],
