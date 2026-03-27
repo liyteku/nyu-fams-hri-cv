@@ -1,21 +1,36 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
+
+# Virtual environments
 .venv/
 env/
 .env
+
+# Data & model weights (too large for git)
 data/
+*.pth
+
+# Training outputs (logs, plots, etc.)
 outputs/
 tests/
-yolo*.pt
 *.log
+yolo*.pt
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log

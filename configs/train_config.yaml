@@ -66,5 +66,5 @@ train:
 
 # Output
 output:
-  dir: "outputs"
+  dir: "outputs/emotion"
   best_model_name: "best_model.pth"

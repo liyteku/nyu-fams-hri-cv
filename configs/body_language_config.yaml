@@ -1,0 +1,67 @@
+# Body Language (Skeleton Action) Recognition Config
+
+# Dataset — NTU RGB+D 60 (preprocessed)
+data:
+  data_dir: "data/NTU-RGBD"         # Preprocessed .npy files
+  num_classes: 7
+  max_frames: 64                     # Pad/crop sequences to this length
+  # Selected NTU action classes relevant to AI Tutor
+  # reading + writing merged into "studying"
+  selected_actions:
+    8: "sitting_down"
+    9: "standing_up"
+    10: "clapping"
+    11: "studying"
+    12: "studying"
+    23: "hand_waving"
+    28: "phone_call"
+    29: "playing_with_phone"
+  class_names:
+    - "sitting_down"
+    - "standing_up"
+    - "clapping"
+    - "studying"
+    - "hand_waving"
+    - "phone_call"
+    - "playing_with_phone"
+
+# NTU 25-joint to COCO 17-joint mapping
+# NTU joint index -> COCO joint index (or -1 if no mapping)
+joint_mapping:
+  # COCO:  0-nose  1-Leye  2-Reye  3-Lear  4-Rear
+  # NTU:   3-head  3-head  3-head  3-head   3-head
+  # COCO:  5-Lsho  6-Rsho  7-Lelb  8-Relb  9-Lwri  10-Rwri
+  # NTU:   4       8       5       9       6        10
+  # COCO:  11-Lhip 12-Rhip 13-Lkne 14-Rkne 15-Lank 16-Rank
+  # NTU:   12      16      13      17      14       18
+  ntu_to_coco: [3, 3, 3, 3, 3, 4, 8, 5, 9, 6, 10, 12, 16, 13, 17, 14, 18]
+
+# Model
+model:
+  in_channels: 9        # 3 joint + 3 bone + 3 motion
+  dropout: 0.3
+
+# Training
+train:
+  epochs: 100
+  batch_size: 64
+  lr: 0.01
+  weight_decay: 1.0e-3
+  scheduler: "cosine"
+  warmup_epochs: 5
+  num_workers: 4
+  pin_memory: true
+  label_smoothing: 0.1
+  early_stopping_patience: 15
+
+# Augmentation
+augmentation:
+  random_rotate: 15.0       # degrees
+  random_scale: [0.85, 1.15]
+  random_shift: 0.08
+  temporal_crop: true       # random start position for temporal window
+
+# Output
+output:
+  dir: "outputs/body_language"
+  best_model_name: "best_action_model.pth"
