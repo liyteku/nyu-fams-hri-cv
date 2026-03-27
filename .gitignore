@@ -11,6 +11,8 @@ build/
 .venv/
 env/
 .env
+uv.lock
+pyproject.toml
 
 # Data & model weights (too large for git)
 data/
