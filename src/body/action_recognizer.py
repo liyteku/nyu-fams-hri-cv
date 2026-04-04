@@ -221,4 +221,3 @@ class ActionRecognizer:
         if direction == "right":
             return dx > 0
         return False
-

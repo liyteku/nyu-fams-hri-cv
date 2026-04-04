@@ -26,7 +26,7 @@ class BodyPoseDetector:
     Wrapper around a YOLO11-pose model.
 
     Example:
-        detector = BodyPoseDetector("yolo11n-pose.pt")
+        detector = BodyPoseDetector()  # default: outputs/yolo11n-pose.pt
         results = detector.detect_pose(frame)
     """
 
@@ -142,5 +142,3 @@ class BodyPoseDetector:
             )
 
         return outputs
-
-

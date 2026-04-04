@@ -9,8 +9,14 @@ import cv2
 import numpy as np
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from collections import deque
+
+
+def _top_emotions_by_prob(emotion_probs: Dict[str, float], k: int = 2) -> List[Dict[str, float]]:
+    """Return top-k emotions by softmax probability, e.g. [{"emotion": "happy", "confidence": 45.2}, ...]."""
+    sorted_items = sorted(emotion_probs.items(), key=lambda x: x[1], reverse=True)[:k]
+    return [{"emotion": name, "confidence": float(p)} for name, p in sorted_items]
 
 
 def _default_emotion_model_path() -> str:
@@ -43,17 +49,60 @@ class EmotionDetector:
         "neutral":   "neutral",
     }
 
-    def __init__(self, smoothing_window: int = 5, model_path: Optional[str] = None):
+    def __init__(
+        self,
+        vote_window: int = 3,
+        inference_every_n_frames: int = 5,
+        min_inference_interval_sec: float = 0.0,
+        model_path: Optional[str] = None,
+        *,
+        smoothing_window: Optional[int] = None,
+        anger_suppress: bool = True,
+        anger_min_confidence: float = 56.0,
+        anger_min_lead_pct: float = 15.0,
+        prefer_neutral_when_ambiguous: bool = True,
+        ambiguous_margin_pct: float = 13.0,
+        angry_dampen_factor: float = 1.0,
+    ):
         """
         Args:
-            smoothing_window: frames used for majority-vote smoothing
+            vote_window: number of recent inference results to majority-vote for
+                `smoothed_emotion` / `learning_state` (each sample is one forward pass).
+            inference_every_n_frames: run the model every N-th call to `detect_emotion`
+                (main-loop iterations ≈ camera frames). 1 = every frame.
+            min_inference_interval_sec: optional extra throttle between inferences (0 = off).
             model_path: path to best_model.pth; defaults to outputs/best_model.pth or best_model.pth
+            smoothing_window: deprecated alias for `vote_window`.
+            anger_suppress: if True, only accept `angry` when probability and margin vs
+                runner-up are high enough; otherwise use the second-best class (reduces
+                false angry from neutral/concentrated faces).
+            anger_min_confidence: min softmax probability (0-100) for angry to be kept.
+            anger_min_lead_pct: angry must lead the second class by at least this many
+                percentage points.
+            prefer_neutral_when_ambiguous: if True and (top1 prob - top2 prob) is below
+                `ambiguous_margin_pct`, use `neutral` as the frame label for voting
+                (reduces flip-flop and increases neutral when the model is unsure).
+            ambiguous_margin_pct: max gap between 1st and 2nd class (percentage points)
+                to treat the frame as ambiguous and prefer neutral.
+            angry_dampen_factor: multiply raw `angry` probability by this (then renormalize
+                all classes to 100%). Default 1.0 disables dampening. Values below 1.0 lower
+                angry prevalence in the UI. Used for `top_emotions`, bars, and voting.
         """
-        self.smoothing_window = smoothing_window
-        self.emotion_history: deque = deque(maxlen=smoothing_window)
+        if smoothing_window is not None:
+            vote_window = smoothing_window
+        self.vote_window = vote_window
+        self._anger_suppress = anger_suppress
+        self._anger_min_confidence = float(anger_min_confidence)
+        self._anger_min_lead_pct = float(anger_min_lead_pct)
+        self._prefer_neutral_ambiguous = prefer_neutral_when_ambiguous
+        self._ambiguous_margin_pct = float(ambiguous_margin_pct)
+        self._angry_dampen_factor = float(angry_dampen_factor)
+        self.emotion_history: deque = deque(maxlen=vote_window)
 
+        self.inference_every_n_frames = max(1, int(inference_every_n_frames))
+        self.min_inference_interval_sec = max(0.0, float(min_inference_interval_sec))
+        self._frame_counter = 0
         self.last_detection_time = 0.0
-        self.detection_interval = 0.5  # seconds between inference calls
         self.last_emotion: Optional[Dict] = None
 
         # ── Primary: custom model ─────────────────────────────────────────
@@ -128,13 +177,25 @@ class EmotionDetector:
     ) -> Optional[Dict]:
         """
         Detect emotion in frame.
-        Returns cached result within detection_interval to save compute.
+
+        The model runs every `inference_every_n_frames` calls (plus optional
+        `min_inference_interval_sec`). Each successful inference appends its
+        dominant label to a buffer of size `vote_window`; `smoothed_emotion` is
+        the majority vote over that buffer. Between inference steps the last
+        result is returned unchanged.
         """
         if not self.is_available:
             return None
 
+        self._frame_counter += 1
+        if (self._frame_counter % self.inference_every_n_frames) != 0:
+            return self.last_emotion
+
         current_time = time.time()
-        if current_time - self.last_detection_time < self.detection_interval:
+        if (
+            self.min_inference_interval_sec > 0
+            and current_time - self.last_detection_time < self.min_inference_interval_sec
+        ):
             return self.last_emotion
 
         result = None
@@ -163,10 +224,8 @@ class EmotionDetector:
             return ""
 
         recommendations = {
-            "positive":   "Student appears engaged and understanding. Continue current approach.",
             "confused":   "Student seems confused or surprised. Consider explaining the concept differently.",
-            "frustrated": "Student appears frustrated. Take a break or try a simpler explanation.",
-            "bored":      "Student seems disengaged. Try to make content more interactive or take a break.",
+            "frustrated": "Student appears frustrated or sad. Take a break or try a simpler explanation.",
             "neutral":    "",
         }
         return recommendations.get(learning_state, "")
@@ -183,6 +242,7 @@ class EmotionDetector:
         confidence       = emotion_data.get("confidence", 0)
         learning_state   = emotion_data.get("learning_state", "unknown")
         backend          = emotion_data.get("backend", "")
+        top_emotions     = emotion_data.get("top_emotions") or []
 
         emotion_colors = {
             "happy":    (0, 255, 0),
@@ -194,14 +254,28 @@ class EmotionDetector:
             "neutral":  (128, 128, 128),
         }
         color = emotion_colors.get(smoothed_emotion, (255, 255, 255))
+        if top_emotions:
+            color = emotion_colors.get(top_emotions[0].get("emotion", ""), color)
 
         backend_tag = f" [{backend}]" if backend else ""
         y_offset = 120
+        if len(top_emotions) >= 2:
+            e0 = top_emotions[0]
+            e1 = top_emotions[1]
+            line = (
+                f"Emotion: {e0['emotion'].upper()} ({e0['confidence']:.1f}%) | "
+                f"{e1['emotion'].upper()} ({e1['confidence']:.1f}%){backend_tag}"
+            )
+        elif len(top_emotions) == 1:
+            e0 = top_emotions[0]
+            line = f"Emotion: {e0['emotion'].upper()} ({e0['confidence']:.1f}%){backend_tag}"
+        else:
+            line = f"Emotion: {smoothed_emotion.upper()} ({confidence:.1f}%){backend_tag}"
         cv2.putText(
             frame,
-            f"Emotion: {smoothed_emotion.upper()} ({confidence:.1f}%){backend_tag}",
+            line,
             (10, y_offset),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
         )
 
         y_offset += 25
@@ -212,11 +286,24 @@ class EmotionDetector:
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
         )
 
+        vs = emotion_data.get("vote_support")
+        vw = emotion_data.get("vote_window")
+        vf = emotion_data.get("votes_filled")
+        if vs and vw is not None:
+            y_offset += 22
+            a, b = vs[0], vs[1]
+            cv2.putText(
+                frame,
+                f"Vote: {a}/{b} (window={vw}, filled={vf})",
+                (10, y_offset),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+            )
+
         emotion_probs = emotion_data.get("emotion_probabilities", {})
         if emotion_probs:
             sorted_emotions = sorted(
                 emotion_probs.items(), key=lambda x: x[1], reverse=True
-            )[:3]
+            )[:2]
             y_offset += 30
             for emotion, prob in sorted_emotions:
                 bar_width = int(prob * 2)
@@ -273,24 +360,38 @@ class EmotionDetector:
             logits = self.custom_model(face_tensor)
             probs  = self._torch.softmax(logits, dim=1)[0].cpu().numpy()
 
-        # Build probability dict using canonical label names
-        emotion_probs: Dict[str, float] = {}
+        # Raw softmax (model), then unified distribution for UI + voting
+        emotion_probs_raw: Dict[str, float] = {}
         for i, cls_name in enumerate(self._class_names):
             canonical = self._MODEL_LABEL_MAP.get(cls_name, cls_name)
-            emotion_probs[canonical] = float(probs[i]) * 100.0
+            emotion_probs_raw[canonical] = float(probs[i]) * 100.0
+
+        emotion_probs = self._dampen_angry_and_renormalize(emotion_probs_raw)
+
+        top_emotions = _top_emotions_by_prob(emotion_probs, 2)
 
         dominant_emotion = max(emotion_probs, key=emotion_probs.get)
+        dominant_emotion = self._maybe_demote_angry(emotion_probs, dominant_emotion)
+        dominant_emotion = self._maybe_prefer_neutral_ambiguous(
+            emotion_probs, dominant_emotion
+        )
         self.emotion_history.append(dominant_emotion)
         smoothed_emotion = self._get_smoothed_emotion()
+        vote_support = self._vote_support(smoothed_emotion)
 
         return {
             "dominant_emotion":     dominant_emotion,
             "smoothed_emotion":     smoothed_emotion,
+            "top_emotions":         top_emotions,
             "emotion_probabilities": emotion_probs,
-            "confidence":           emotion_probs[dominant_emotion],
+            "emotion_probabilities_raw": emotion_probs_raw,
+            "confidence":           emotion_probs.get(dominant_emotion, 0.0),
             "face_location":        (x, y, w, h),
             "learning_state":       self._get_learning_state(smoothed_emotion),
             "backend":              "custom_model",
+            "vote_window":          self.vote_window,
+            "votes_filled":         len(self.emotion_history),
+            "vote_support":         vote_support,
         }
 
     def _preprocess_face(self, face_bgr: np.ndarray):
@@ -307,23 +408,76 @@ class EmotionDetector:
 
     # ── Private: helpers ───────────────────────────────────────────────────
 
+    def _dampen_angry_and_renormalize(
+        self, emotion_probs: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        Single distribution for top_emotions, probability bars, and post-rules.
+        Lowers angry share, then renormalizes to sum 100%.
+        """
+        out = {k: float(v) for k, v in emotion_probs.items()}
+        f = self._angry_dampen_factor
+        if "angry" in out and f < 1.0:
+            out["angry"] *= f
+        total = sum(out.values())
+        if total <= 0:
+            return dict(emotion_probs)
+        return {k: v * 100.0 / total for k, v in out.items()}
+
+    def _maybe_demote_angry(
+        self, emotion_probs: Dict[str, float], argmax_emotion: str
+    ) -> str:
+        """If argmax is angry but not confident enough vs runner-up, use 2nd best."""
+        if not self._anger_suppress or argmax_emotion != "angry":
+            return argmax_emotion
+        sorted_items = sorted(emotion_probs.items(), key=lambda x: x[1], reverse=True)
+        if len(sorted_items) < 2:
+            return argmax_emotion
+        top_p = sorted_items[0][1]
+        second_name, second_p = sorted_items[1]
+        lead = top_p - second_p
+        if (
+            top_p >= self._anger_min_confidence
+            and lead >= self._anger_min_lead_pct
+        ):
+            return "angry"
+        return second_name
+
+    def _maybe_prefer_neutral_ambiguous(
+        self, emotion_probs: Dict[str, float], emotion: str
+    ) -> str:
+        """If top-1 and top-2 are close in probability, label this frame as neutral."""
+        if not self._prefer_neutral_ambiguous:
+            return emotion
+        sorted_items = sorted(emotion_probs.items(), key=lambda x: x[1], reverse=True)
+        if len(sorted_items) < 2:
+            return emotion
+        top_p = sorted_items[0][1]
+        second_p = sorted_items[1][1]
+        if top_p - second_p < self._ambiguous_margin_pct:
+            return "neutral"
+        return emotion
+
     def _get_smoothed_emotion(self) -> str:
         if not self.emotion_history:
             return "neutral"
         emotions = list(self.emotion_history)
         return max(set(emotions), key=emotions.count)
 
+    def _vote_support(self, winner: str) -> tuple:
+        """(count for winner, total votes in buffer)."""
+        emotions = list(self.emotion_history)
+        if not emotions:
+            return (0, 0)
+        return (emotions.count(winner), len(emotions))
+
     def _get_learning_state(self, emotion: str) -> str:
-        if emotion == "happy":
-            return "positive"
-        elif emotion in ("surprise", "fear"):
+        if emotion in ("surprise", "fear"):
             return "confused"
-        elif emotion in ("angry", "disgust"):
+        if emotion in ("angry", "disgust", "sad"):
             return "frustrated"
-        elif emotion == "sad":
-            return "bored"
-        else:
-            return "neutral"
+        # happy, neutral, and anything else → neutral (no separate positive/bored)
+        return "neutral"
 
 
 # ── Standalone test ────────────────────────────────────────────────────────
