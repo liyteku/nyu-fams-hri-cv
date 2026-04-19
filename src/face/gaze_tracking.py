@@ -12,8 +12,11 @@ Download from: https://storage.googleapis.com/mediapipe-models/face_landmarker/f
 import os
 import cv2
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from collections import deque
+
+if TYPE_CHECKING:
+    from ..embodied_policy.policy_engine import PolicyEngine
 
 # Default: src/face/face_landmarker.task
 _DEFAULT_MODEL_PATH = os.path.join(
@@ -195,26 +198,32 @@ class GazeTracker:
             },
         }
 
-    def get_attention_recommendation(self, gaze_data: Dict) -> str:
-        if not gaze_data:
+    def get_attention_recommendation(
+        self,
+        gaze_data: Dict,
+        emotion_data: Optional[Dict] = None,
+        policy_engine: Optional["PolicyEngine"] = None,
+        min_emotion_confidence: float = 40.0,
+    ) -> str:
+        """
+        Same policy-based tutor instruction as
+        :meth:`EmotionDetector.get_teaching_recommendation`, using gaze plus
+        optional emotion. Uses ``PolicyEngine`` via ``instruction_from_perception``.
+        """
+        if not gaze_data and not emotion_data:
             return ""
 
-        is_looking   = gaze_data.get("smoothed_looking_at_screen", False)
-        score        = gaze_data.get("attention_score", 0)
-        h_dir        = gaze_data.get("horizontal_direction", "center")
-        v_dir        = gaze_data.get("vertical_direction", "center")
+        from ..embodied_policy.policy_engine import instruction_from_perception
 
-        if is_looking and score > 70:
-            return "Student is attentive and focused on the content."
-        elif score < 30:
-            return "Student appears distracted - not looking at the screen."
-        elif h_dir in ("left", "right"):
-            return f"Student is looking {h_dir} - may be distracted."
-        elif v_dir == "down":
-            return "Student looking down - may be taking notes or using phone."
-        elif v_dir == "up":
-            return "Student looking up - may be thinking or distracted."
-        return ""
+        min_conf: Optional[float] = (
+            min_emotion_confidence if emotion_data is not None else None
+        )
+        return instruction_from_perception(
+            emotion_data,
+            gaze_data,
+            policy_engine=policy_engine,
+            min_emotion_confidence=min_conf,
+        )
 
     def draw_gaze_overlay(
         self, frame: np.ndarray, gaze_data: Optional[Dict]

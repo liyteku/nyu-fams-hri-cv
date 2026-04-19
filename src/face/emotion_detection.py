@@ -9,8 +9,11 @@ import cv2
 import numpy as np
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 from collections import deque
+
+if TYPE_CHECKING:
+    from ..embodied_policy.policy_engine import PolicyEngine
 
 
 def _top_emotions_by_prob(emotion_probs: Dict[str, float], k: int = 2) -> List[Dict[str, float]]:
@@ -212,23 +215,29 @@ class EmotionDetector:
             self.last_emotion = result
         return self.last_emotion
 
-    def get_teaching_recommendation(self, emotion_data: Dict) -> str:
-        """Return a teaching suggestion string based on detected emotion."""
+    def get_teaching_recommendation(
+        self,
+        emotion_data: Dict,
+        gaze_data: Optional[Dict] = None,
+        policy_engine: Optional["PolicyEngine"] = None,
+        min_confidence: float = 40.0,
+    ) -> str:
+        """
+        Tutor instruction from :class:`~src.embodied_policy.policy_engine.PolicyEngine`
+        (fused emotion + optional gaze). Empty string if ``emotion_data`` is
+        missing or confidence is below ``min_confidence``.
+        """
         if not emotion_data:
             return ""
 
-        learning_state = emotion_data.get("learning_state", "neutral")
-        confidence     = emotion_data.get("confidence", 0)
+        from ..embodied_policy.policy_engine import instruction_from_perception
 
-        if confidence < 40:
-            return ""
-
-        recommendations = {
-            "confused":   "Student seems confused or surprised. Consider explaining the concept differently.",
-            "frustrated": "Student appears frustrated or sad. Take a break or try a simpler explanation.",
-            "neutral":    "",
-        }
-        return recommendations.get(learning_state, "")
+        return instruction_from_perception(
+            emotion_data,
+            gaze_data,
+            policy_engine=policy_engine,
+            min_emotion_confidence=min_confidence,
+        )
 
     def draw_emotion_overlay(
         self, frame: np.ndarray, emotion_data: Optional[Dict]
