@@ -9,11 +9,36 @@ import cv2
 import numpy as np
 import os
 import time
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from collections import deque
 
 if TYPE_CHECKING:
     from ..embodied_policy.policy_engine import PolicyEngine
+
+
+def _put_text_outline(
+    img: np.ndarray,
+    text: str,
+    org: tuple,
+    font: int,
+    scale: float,
+    color: tuple,
+    thickness: int,
+) -> None:
+    """``putText`` with a thin black outline for contrast on bright backgrounds."""
+    x, y = int(org[0]), int(org[1])
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        cv2.putText(
+            img,
+            text,
+            (x + dx, y + dy),
+            font,
+            scale,
+            (0, 0, 0),
+            thickness + 1,
+            lineType=cv2.LINE_AA,
+        )
+    cv2.putText(img, text, org, font, scale, color, thickness, lineType=cv2.LINE_AA)
 
 
 def _top_emotions_by_prob(emotion_probs: Dict[str, float], k: int = 2) -> List[Dict[str, float]]:
@@ -55,16 +80,16 @@ class EmotionDetector:
     def __init__(
         self,
         vote_window: int = 3,
-        inference_every_n_frames: int = 5,
+        inference_every_n_frames: int = 3,
         min_inference_interval_sec: float = 0.0,
         model_path: Optional[str] = None,
         *,
         smoothing_window: Optional[int] = None,
         anger_suppress: bool = True,
-        anger_min_confidence: float = 56.0,
-        anger_min_lead_pct: float = 15.0,
+        anger_min_confidence: float = 45.0,
+        anger_min_lead_pct: float = 6.0,
         prefer_neutral_when_ambiguous: bool = True,
-        ambiguous_margin_pct: float = 13.0,
+        ambiguous_margin_pct: float = 11.0,
         angry_dampen_factor: float = 1.0,
     ):
         """
@@ -79,12 +104,15 @@ class EmotionDetector:
             anger_suppress: if True, only accept `angry` when probability and margin vs
                 runner-up are high enough; otherwise use the second-best class (reduces
                 false angry from neutral/concentrated faces).
-            anger_min_confidence: min softmax probability (0-100) for angry to be kept.
+            anger_min_confidence: min softmax probability (0-100) for angry to be kept
+                when ``anger_suppress`` is on (lower = easier to accept angry).
             anger_min_lead_pct: angry must lead the second class by at least this many
                 percentage points.
             prefer_neutral_when_ambiguous: if True and (top1 prob - top2 prob) is below
                 `ambiguous_margin_pct`, use `neutral` as the frame label for voting
                 (reduces flip-flop and increases neutral when the model is unsure).
+                Does not apply when the dominant label is already ``angry`` (so angry
+                is not collapsed to neutral by a narrow margin).
             ambiguous_margin_pct: max gap between 1st and 2nd class (percentage points)
                 to treat the frame as ambiguous and prefer neutral.
             angry_dampen_factor: multiply raw `angry` probability by this (then renormalize
@@ -241,10 +269,19 @@ class EmotionDetector:
 
     def draw_emotion_overlay(
         self, frame: np.ndarray, emotion_data: Optional[Dict]
-    ) -> np.ndarray:
-        """Draw emotion info and probability bars onto frame."""
+    ) -> Tuple[np.ndarray, int]:
+        """
+        Draw emotion info and compact probability bars (left column + bar strip).
+
+        Returns ``(frame, y_next)`` where ``y_next`` is the baseline row below this
+        block; pass it to :meth:`~src.face.gaze_tracking.GazeTracker.draw_gaze_overlay`
+        as ``start_y`` so gaze lines do not overlap emotion text or bars.
+        """
+        x0 = 10
+        y = 28
+        line_h = 26
         if not emotion_data:
-            return frame
+            return frame, y
 
         dominant_emotion = emotion_data.get("dominant_emotion", "unknown")
         smoothed_emotion = emotion_data.get("smoothed_emotion", dominant_emotion)
@@ -267,7 +304,6 @@ class EmotionDetector:
             color = emotion_colors.get(top_emotions[0].get("emotion", ""), color)
 
         backend_tag = f" [{backend}]" if backend else ""
-        y_offset = 120
         if len(top_emotions) >= 2:
             e0 = top_emotions[0]
             e1 = top_emotions[1]
@@ -280,58 +316,65 @@ class EmotionDetector:
             line = f"Emotion: {e0['emotion'].upper()} ({e0['confidence']:.1f}%){backend_tag}"
         else:
             line = f"Emotion: {smoothed_emotion.upper()} ({confidence:.1f}%){backend_tag}"
-        cv2.putText(
-            frame,
-            line,
-            (10, y_offset),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
-        )
+        _put_text_outline(frame, line, (x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        y += line_h
 
-        y_offset += 25
-        cv2.putText(
+        _put_text_outline(
             frame,
             f"Learning State: {learning_state}",
-            (10, y_offset),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+            (x0, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (255, 255, 255),
+            1,
         )
+        y += line_h
 
         vs = emotion_data.get("vote_support")
         vw = emotion_data.get("vote_window")
         vf = emotion_data.get("votes_filled")
         if vs and vw is not None:
-            y_offset += 22
             a, b = vs[0], vs[1]
-            cv2.putText(
+            _put_text_outline(
                 frame,
                 f"Vote: {a}/{b} (window={vw}, filled={vf})",
-                (10, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+                (x0, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (245, 245, 255),
+                1,
             )
+            y += line_h
 
         emotion_probs = emotion_data.get("emotion_probabilities", {})
         if emotion_probs:
             sorted_emotions = sorted(
                 emotion_probs.items(), key=lambda x: x[1], reverse=True
             )[:2]
-            y_offset += 30
+            bar_max_w = 100
+            bar_h = 16
+            row_gap = 6
+            y += 4
             for emotion, prob in sorted_emotions:
-                bar_width = int(prob * 2)
-                cv2.rectangle(
+                ec = emotion_colors.get(emotion, (255, 255, 255))
+                bar_w = min(int(prob * 2), bar_max_w)
+                top = y
+                cv2.rectangle(frame, (x0, top), (x0 + bar_w, top + bar_h), ec, -1)
+                cv2.rectangle(frame, (x0, top), (x0 + bar_max_w, top + bar_h), (70, 70, 70), 1)
+                label = f"{emotion}: {prob:.1f}%"
+                lx = x0 + bar_max_w + 10
+                _put_text_outline(
                     frame,
-                    (10, y_offset),
-                    (10 + bar_width, y_offset + 15),
-                    emotion_colors.get(emotion, (255, 255, 255)),
-                    -1,
+                    label,
+                    (lx, top + bar_h - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    (255, 255, 255),
+                    1,
                 )
-                cv2.putText(
-                    frame,
-                    f"{emotion}: {prob:.1f}%",
-                    (220, y_offset + 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1,
-                )
-                y_offset += 20
+                y = top + bar_h + row_gap
 
-        return frame
+        return frame, y + 12
 
     # ── Private: custom model inference ───────────────────────────────────
 
@@ -458,6 +501,8 @@ class EmotionDetector:
         """If top-1 and top-2 are close in probability, label this frame as neutral."""
         if not self._prefer_neutral_ambiguous:
             return emotion
+        if emotion == "angry":
+            return emotion
         sorted_items = sorted(emotion_probs.items(), key=lambda x: x[1], reverse=True)
         if len(sorted_items) < 2:
             return emotion
@@ -508,7 +553,7 @@ def test_emotion_detection():
             break
 
         emotion_data = detector.detect_emotion(frame, enforce_detection=False)
-        frame = detector.draw_emotion_overlay(frame, emotion_data)
+        frame, _ = detector.draw_emotion_overlay(frame, emotion_data)
 
         if emotion_data:
             rec = detector.get_teaching_recommendation(emotion_data)

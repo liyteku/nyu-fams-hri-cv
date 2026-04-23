@@ -12,11 +12,37 @@ Download from: https://storage.googleapis.com/mediapipe-models/face_landmarker/f
 import os
 import cv2
 import numpy as np
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
 from collections import deque
 
 if TYPE_CHECKING:
     from ..embodied_policy.policy_engine import PolicyEngine
+
+
+def _put_text_outline(
+    img: np.ndarray,
+    text: str,
+    org: tuple,
+    font: int,
+    scale: float,
+    color: tuple,
+    thickness: int,
+) -> None:
+    """``putText`` with a thin black outline for contrast on bright backgrounds."""
+    x, y = int(org[0]), int(org[1])
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        cv2.putText(
+            img,
+            text,
+            (x + dx, y + dy),
+            font,
+            scale,
+            (0, 0, 0),
+            thickness + 1,
+            lineType=cv2.LINE_AA,
+        )
+    cv2.putText(img, text, org, font, scale, color, thickness, lineType=cv2.LINE_AA)
+
 
 # Default: src/face/face_landmarker.task
 _DEFAULT_MODEL_PATH = os.path.join(
@@ -226,10 +252,24 @@ class GazeTracker:
         )
 
     def draw_gaze_overlay(
-        self, frame: np.ndarray, gaze_data: Optional[Dict]
-    ) -> np.ndarray:
+        self,
+        frame: np.ndarray,
+        gaze_data: Optional[Dict],
+        start_y: Optional[int] = None,
+    ) -> Tuple[np.ndarray, int]:
+        """
+        Draw gaze status under the emotion block.
+
+        ``start_y`` is the first text baseline (from :meth:`EmotionDetector.draw_emotion_overlay`
+        return value) so this layer does not overlap emotion labels or bars.
+
+        Returns ``(frame, y_next)`` for stacking further overlays (e.g. policy text).
+        """
+        x0 = 10
+        line_h = 26
+        y = int(start_y) if start_y is not None else 28
         if not gaze_data:
-            return frame
+            return frame, y
 
         h_dir   = gaze_data.get("horizontal_direction", "unknown")
         v_dir   = gaze_data.get("vertical_direction", "unknown")
@@ -243,27 +283,49 @@ class GazeTracker:
         else:
             color, status = (0, 0, 255), "DISTRACTED"
 
-        y = 220
-        cv2.putText(frame, f"Gaze: {status}", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        y += 25
-        cv2.putText(frame, f"Direction: {v_dir.upper()}-{h_dir.upper()}", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y += 25
-        cv2.putText(frame, f"Attention: {score:.1f}%", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        _put_text_outline(
+            frame,
+            f"Gaze: {status}",
+            (x0, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            color,
+            2,
+        )
+        y += line_h
+        _put_text_outline(
+            frame,
+            f"Direction: {v_dir.upper()}-{h_dir.upper()}",
+            (x0, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (255, 255, 255),
+            1,
+        )
+        y += line_h
+        _put_text_outline(
+            frame,
+            f"Attention: {score:.1f}%",
+            (x0, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (255, 255, 255),
+            1,
+        )
 
-        y += 30
-        bar_w = int(score * 2)
-        cv2.rectangle(frame, (10, y), (10 + bar_w, y + 15), color, -1)
-        cv2.rectangle(frame, (10, y), (210, y + 15), (100, 100, 100), 2)
+        y += line_h + 4
+        bar_h = 16
+        bar_max = 200
+        bar_w = min(int(score * 2), bar_max)
+        cv2.rectangle(frame, (x0, y), (x0 + bar_w, y + bar_h), color, -1)
+        cv2.rectangle(frame, (x0, y), (x0 + bar_max, y + bar_h), (90, 90, 90), 1)
 
         for key in ("left", "right"):
             pos = gaze_data.get("iris_positions", {}).get(key)
             if pos:
                 cv2.circle(frame, (int(pos[0]), int(pos[1])), 3, (0, 255, 255), -1)
 
-        return frame
+        return frame, y + bar_h + 14
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -298,7 +360,7 @@ def test_gaze_tracking():
             break
 
         gaze_data = tracker.detect_gaze(frame)
-        frame = tracker.draw_gaze_overlay(frame, gaze_data)
+        frame, _ = tracker.draw_gaze_overlay(frame, gaze_data)
 
         if gaze_data:
             rec = tracker.get_attention_recommendation(gaze_data)
